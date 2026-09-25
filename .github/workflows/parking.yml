@@ -1,0 +1,55 @@
+name: Surveille parking Massy
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: pip install playwright requests && playwright install --with-deps chromium
+      - name: Verifier
+        env:
+          EMAIL: ${{ secrets.EMAIL }}
+          TEST: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: python
+        run: |
+          import os, requests
+          from playwright.sync_api import sync_playwright
+          URL = "https://www.effia.com/parking/parking-gare-de-massy-vilmorin-pr-effia?entry=2026-11-01T00%3A00&exit=2026-11-30T00%3A00&vehicle=AUTO&qty=1&premium=FALSE&electric=FALSE&orderType=subscription"
+          def notif(titre, msg, prio=5):
+              d = {"topic": "massy-parking-7ceb6a7293", "title": titre, "message": msg, "priority": prio, "click": URL}
+              if os.environ.get("EMAIL"): d["email"] = os.environ["EMAIL"]
+              print("notif", requests.post("https://ntfy.sh/", json=d, timeout=15).status_code)
+          def choisir(page, txt):
+              for s in page.locator("select").all():
+                  for o in s.locator("option").all():
+                      l = (o.inner_text() or "").strip()
+                      if txt.lower() in l.lower():
+                          s.select_option(label=l, force=True); return True
+              return False
+          def visible(loc):
+              return any(loc.nth(i).is_visible() for i in range(loc.count()))
+          with sync_playwright() as p:
+              b = p.chromium.launch(); page = b.new_page(locale="fr-FR")
+              page.goto(URL, wait_until="networkidle", timeout=60000)
+              for t in ["Refuser", "Continuer sans accepter", "Accepter"]:
+                  try: page.get_by_role("button", name=t).first.click(timeout=2000); break
+                  except Exception: pass
+              try: page.locator("a[href='#subscribe']").first.click(timeout=5000)
+              except Exception: pass
+              ok = choisir(page, "Navigo - Gratuit"); choisir(page, "Novembre"); choisir(page, "2026")
+              c = page.get_by_text("Calculez votre tarif")
+              for i in range(c.count()):
+                  if c.nth(i).is_visible(): c.nth(i).click(); break
+              page.wait_for_load_state("networkidle"); page.wait_for_timeout(3000)
+              complet = visible(page.get_by_text("Plus d'abonnement disponible"))
+              libre = visible(page.get_by_text("S'abonner", exact=True)) or visible(page.get_by_text("place(s) restante(s)"))
+              b.close()
+          print("offre trouvee:", ok, "complet:", complet, "libre:", libre)
+          if ok and not complet and libre:
+              notif("Place libre a Massy Vilmorin !", "Abonnement Navigo gratuit disponible. Vite !")
+          if os.environ.get("TEST") == "true":
+              etat = "complet" if complet else ("LIBRE" if libre else "indetermine, offre trouvee=%s" % ok)
+              notif("Test parking", "Les alertes marchent. Etat actuel : " + etat, 3)
