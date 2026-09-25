@@ -1,0 +1,72 @@
+name: Surveille parking Massy
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - run: pip install playwright requests && playwright install --with-deps chromium
+      - name: Verifier
+        env:
+          TEST: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: python
+        run: |
+          import os, sys, requests
+          from playwright.sync_api import sync_playwright
+          URL = "https://www.effia.com/parking/parking-gare-de-massy-vilmorin-pr-effia?entry=2026-11-01T00%3A00&exit=2026-11-30T00%3A00&vehicle=AUTO&qty=1&premium=FALSE&electric=FALSE&orderType=subscription"
+          OFFRE = "Navigo - Gratuit"
+          def notif(titre, msg, prio=5):
+              r = requests.post("https://ntfy.sh/massy-parking-7ceb6a7293", data=msg.encode(),
+                  headers={"Title": titre, "Priority": str(prio), "Click": URL}, timeout=15)
+              print("notif", r.status_code, r.text[:200])
+          def visible(loc):
+              return any(loc.nth(i).is_visible() for i in range(loc.count()))
+          def choisir(page, txt):
+              for s in page.locator("select").all():
+                  for o in s.locator("option").all():
+                      l = (o.inner_text() or "").strip()
+                      if txt.lower() in l.lower():
+                          s.select_option(label=l, force=True); return "select"
+              for loc in [page.get_by_label(txt, exact=False), page.get_by_text(txt, exact=False)]:
+                  for i in range(loc.count()):
+                      try:
+                          loc.nth(i).click(timeout=3000, force=True); return "clic"
+                      except Exception: pass
+              return None
+          with sync_playwright() as p:
+              b = p.chromium.launch(); page = b.new_page(locale="fr-FR", viewport={"width": 1280, "height": 900})
+              page.goto(URL, wait_until="networkidle", timeout=60000)
+              for t in ["Refuser", "Continuer sans accepter", "Tout refuser", "Accepter"]:
+                  try: page.get_by_role("button", name=t).first.click(timeout=2000); break
+                  except Exception: pass
+              try: page.locator("a[href='#subscribe']").first.click(timeout=5000)
+              except Exception: pass
+              page.wait_for_timeout(1500)
+              print("--- DEBUG selects ---")
+              for s in page.locator("select").all():
+                  print("SELECT", s.get_attribute("name"), s.get_attribute("id"), "visible=", s.is_visible())
+                  for o in s.locator("option").all()[:12]:
+                      print("   option:", (o.inner_text() or "").strip()[:80], "| value=", o.get_attribute("value"))
+              n = page.get_by_text(OFFRE, exact=False)
+              print("elements avec l'offre:", n.count())
+              for i in range(min(n.count(), 3)):
+                  print("  ", n.nth(i).evaluate("e => e.tagName + ' ' + e.className + ' :: ' + (e.closest('li,label,div')||e).outerHTML.slice(0,600)"))
+              print("--- FIN DEBUG ---")
+              ok = choisir(page, OFFRE)
+              page.wait_for_timeout(1500)
+              choisir(page, "Novembre"); choisir(page, "2026")
+              c = page.get_by_text("Calculez votre tarif")
+              for i in range(c.count()):
+                  if c.nth(i).is_visible(): c.nth(i).click(); break
+              page.wait_for_load_state("networkidle"); page.wait_for_timeout(3000)
+              page.screenshot(path="capture.png", full_page=True)
+              complet = visible(page.get_by_text("Plus d'abonnement disponible"))
+              libre = visible(page.get_by_text("S'abonner", exact=True)) or visible(page.get_by_text("place(s) restante(s)"))
+              b.close()
+          print("offre trouvee:", ok, "complet:", complet, "libre:", libre)
+          if os.environ.get("TEST") == "true":
+              etat = "complet" if complet else ("LIBRE" if libre else "indetermine")
+              notif("Test parking", "
