@@ -1,0 +1,35 @@
+name: Suivi ANEF
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        type: boolean
+        default: true
+concurrency:
+  group: suivi-anef
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: etat
+          key: anef-etat-${{ github.run_id }}
+          restore-keys: anef-etat-
+      - run: pip install playwright requests && playwright install --with-deps chromium
+      - run: python anef.py
+        env:
+          ANEF_USER: ${{ secrets.ANEF_USER }}
+          ANEF_PASS: ${{ secrets.ANEF_PASS }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC_ANEF }}
+          TEST: ${{ inputs.test }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: etat
+          key: anef-etat-${{ github.run_id }}
